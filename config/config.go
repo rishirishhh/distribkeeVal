@@ -57,7 +57,7 @@ func ParseShards(shards []Shard, curShardName string) (*Shards, error) {
 		}
 	}
 
-	for i := 0; i < shardCount; i++ {
+	for i := range shardCount {
 		if _, ok := addrs[i]; !ok {
 			return nil, fmt.Errorf("shard %d is not found", i)
 		}

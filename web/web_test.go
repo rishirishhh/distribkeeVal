@@ -12,8 +12,9 @@ import (
 	"testing"
 
 	"github.com/rishirishhh/distribkv/config"
-	"github.com/rishirishhh/distribkv/db"
 	"github.com/rishirishhh/distribkv/web"
+
+	"github.com/rishirishhh/distribkv/db"
 )
 
 func createShardDb(t *testing.T, idx int) *db.Database {
