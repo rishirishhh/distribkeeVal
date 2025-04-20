@@ -22,7 +22,7 @@ func benchmark(name string, fn func()) {
 	var min = time.Hour
 
 	start := time.Now()
-	for i := 0; i < *iterations; i++ {
+	for range *iterations {
 		iterStart := time.Now()
 		fn()
 		iterTime := time.Since(iterStart)
@@ -62,7 +62,7 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	for i := 0; i < *concurrency; i++ {
+	for range *concurrency {
 		wg.Add(1)
 		go func() {
 			benchmark("write", writeRand)
