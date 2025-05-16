@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
@@ -12,18 +14,49 @@ import (
 )
 
 var (
-	addr        = flag.String("addr", "localhost:8080", "The HTTP host port for the instance that is benchmarked.")
-	iterations  = flag.Int("iterations", 1000, "The number of total iterations (requests)")
-	concurrency = flag.Int("concurrency", 1, "Number of goroutines to run in parallel")
+	addr           = flag.String("addr", "localhost:8080", "The HTTP host port for the instance that is benchmarked.")
+	iterations     = flag.Int("iterations", 1000, "The number of iterations for writing")
+	readIterations = flag.Int("read-iterations", 100000, "The number of iterations for reading")
+	concurrency    = flag.Int("concurrency", 1, "How many goroutines to run in parallel when doing writes")
 )
 
-// Reuse a single HTTP client for all requests
-var httpClient = &http.Client{
-	Timeout: 5 * time.Second,
+var httpClient = &http.Client {
+	Transport: &http.Transport{
+		IdleConnTimeout: time.Second * 10,
+		MaxIdleConns: 300,
+		MaxConnsPerHost: 300,
+		MaxIdleConnsPerHost: 300,
+	},
 }
 
-func writeRand() {
-	key := fmt.Sprintf("key-%d", rand.Intn(1000000))
+func benchmark(name string, iter int, fn func() string) (qps float64, strs []string) {
+	var max time.Duration
+	var min = time.Hour
+
+	start := time.Now()
+	for i := 0; i< iter; i++ {
+		iterStart := time.Now()
+		strs = append(strs,  fn())
+		iterTime := time.Since(iterStart)
+		
+		if iterTime > max {
+			max = iterTime
+		}
+
+		if iterTime < min {
+			min = iterTime
+		}
+ 	}
+
+	avg := time.Since(start) / time.Duration(iter)
+	qps = float64(iter) / (float64(time.Since(start)) / float64(time.Second))
+	fmt.Printf("Func %s took %s avg, %.1f QPS, %s max, %s min\n", name, avg, qps, max, min)
+
+	return qps, strs
+}
+
+func writeRand() (key string) {
+	key = fmt.Sprintf("key-%d", rand.Intn(1000000))
 	value := fmt.Sprintf("value-%d", rand.Intn(1000000))
 
 	values := url.Values{}
@@ -32,79 +65,86 @@ func writeRand() {
 
 	resp, err := httpClient.Get("http://" + (*addr) + "/set?" + values.Encode())
 	if err != nil {
-		log.Printf("Error during set: %v", err)
-		return
+		log.Fatalf("Error during set : %v", err)
 	}
+	
+	io.Copy(ioutil.Discard, resp.Body)
 	defer resp.Body.Close()
+
+	return key
 }
 
-func benchmark(name string, fn func(), iterations int, wg *sync.WaitGroup, resultChan chan time.Duration) {
-	defer wg.Done()
+func readRand(allKeys []string) (key string){
+	key = allKeys[rand.Intn(len(allKeys))]
 
-	for i := 0; i < iterations; i++ {
-		start := time.Now()
-		fn()
-		duration := time.Since(start)
-		resultChan <- duration
+	values := url.Values{}
+	values.Set("key", key)
+
+	resp, err := httpClient.Get("http://"+(*addr) +"/get?"+ values.Encode())
+	if err != nil {
+		log.Fatalf("Error during get: %v", err)
+	} 
+
+	io.Copy(ioutil.Discard, resp.Body)
+	defer resp.Body.Close()
+
+	return key
+}
+
+func benchmarkWrite() (allKeys []string) {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var totalQPS float64
+
+	for i:= 0; i< *concurrency;i++ {
+		wg.Add(1)
+		go func ()  {
+			qps, strs := benchmark("write", *iterations, writeRand)
+			mu.Lock()
+			totalQPS += qps
+			allKeys = append(allKeys, strs...)
+			mu.Unlock()
+
+			wg.Done()
+		}()
 	}
+
+	wg.Wait()
+
+	log.Printf("Write total QPS: %.1f, set %d keys", totalQPS, len(allKeys))
+	return allKeys
+}
+
+func benchmarkRead(allKeys []string) {
+	var totalQPS float64
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for i := 0; i < *concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			qps, _ := benchmark("read", *readIterations, func() string { return readRand(allKeys) })
+			mu.Lock()
+			totalQPS += qps
+			mu.Unlock()
+
+			wg.Done()
+		}()
+	}
+
+	wg.Wait()
+
+	log.Printf("Read total QPS: %.1f", totalQPS)
 }
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	flag.Parse()
 
-	fmt.Printf("Running %d iterations with concurrency level %d\n", *iterations, *concurrency)
+	fmt.Printf("Running with %d iterations and concurrency level %d\n", *iterations, *concurrency)
 
-	// Warm-up phase (10 requests to stabilize)
-	for i := 0; i < 10; i++ {
-		writeRand()
-	}
+	allKeys := benchmarkWrite()
 
-	// Channels and sync
-	var wg sync.WaitGroup
-	resultChan := make(chan time.Duration, *iterations)
-
-	iterationsPerWorker := *iterations / *concurrency
-	extra := *iterations % *concurrency
-
-	start := time.Now()
-
-	for i := 0; i < *concurrency; i++ {
-		count := iterationsPerWorker
-		if i < extra {
-			count++
-		}
-		wg.Add(1)
-		go benchmark("write", writeRand, count, &wg, resultChan)
-	}
-
-	wg.Wait()
-	close(resultChan)
-
-	total := time.Since(start)
-
-	// Analyze results
-	var max time.Duration
-	var min = time.Hour
-	var sum time.Duration
-	count := 0
-
-	for d := range resultChan {
-		if d > max {
-			max = d
-		}
-		if d < min {
-			min = d
-		}
-		sum += d
-		count++
-	}
-
-	avg := sum / time.Duration(count)
-	qps := float64(count) / total.Seconds()
-
-	fmt.Printf("\n==== Benchmark Result ====\n")
-	fmt.Printf("Total Requests: %d\n", count)
-	fmt.Printf("Concurrency: %d\n", *concurrency)
-	fmt.Printf("Avg: %s | Max: %s | Min: %s | QPS: %.2f\n", avg, max, min, qps)
+	go benchmarkWrite()
+	benchmarkRead(allKeys)
 }
