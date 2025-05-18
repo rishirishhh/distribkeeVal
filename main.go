@@ -16,6 +16,7 @@ var (
 	httpAddr   = flag.String("http-addr", "127.0.0.1:8080", "HTTP host and port")
 	configFile = flag.String("config-file", "sharding.toml", "Config file for static sharding")
 	shard      = flag.String("shard", "", "The name of the shard for the data")
+	replica	   = flag.Bool("replica" , false, "Whether or not run as read-only replica")
 )
 
 func parseFlags() {
@@ -45,7 +46,7 @@ func main() {
 
 	log.Printf("Shard count is %d, current shard: %d", shards.Count, shards.CurIdx)
 
-	db, close, err := db.NewDatabase(*dbLocation)
+	db, close, err := db.NewDatabase(*dbLocation, *replica)
 	if err != nil {
 		log.Fatalf("Error creating %q: %v", *dbLocation, err)
 	}

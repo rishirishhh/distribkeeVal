@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,12 +45,13 @@ func (s *Server) GetHandler(w http.ResponseWriter, r *http.Request) {
 	key := r.Form.Get("key")
 
 	shard := s.shards.Index(key)
-	value, err := s.db.GetKey(key)
 
 	if shard != s.shards.CurIdx {
 		s.redirect(shard, w, r)
 		return
 	}
+
+	value, err := s.db.GetKey(key)
 
 	fmt.Fprintf(w, "Shard = %d, current shard = %d, addr = %q, Value = %q, error = %v", shard, s.shards.CurIdx, s.shards.Addrs[shard], value, err)
 }
@@ -75,4 +77,39 @@ func (s *Server) DeleteExtraKeysHandler(w http.ResponseWriter, r *http.Request) 
 	fmt.Fprintf(w, "Error = %v", s.db.DeleteExtraKeys(func(key string) bool {
 		return s.shards.Index(key) != s.shards.CurIdx
 	}))
+}
+
+// NextKeyValue contains the response for GetNextKeyForReplication.
+type NextKeyValue struct {
+	Key   string
+	Value string
+	Err   error
+}
+
+// GetNextKeyForReplication returns the next key for replication.
+func (s *Server) GetNextKeyForReplication(w http.ResponseWriter, r *http.Request) {
+	enc := json.NewEncoder(w)
+	k, v, err := s.db.GetNextKeyForReplication()
+	enc.Encode(&NextKeyValue{
+		Key:   string(k),
+		Value: string(v),
+		Err:   err,
+	})
+}
+
+// DeleteReplicationKey deletes the key from replica queue.
+func (s *Server) DeleteReplicationKey(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+
+	key := r.Form.Get("key")
+	value := r.Form.Get("value")
+
+	err := s.db.DeleteReplicationKey([]byte(key), []byte(value))
+	if err != nil {
+		w.WriteHeader(http.StatusExpectationFailed)
+		fmt.Fprintf(w, "error: %v", err)
+		return
+	}
+
+	fmt.Fprintf(w, "ok")
 }
